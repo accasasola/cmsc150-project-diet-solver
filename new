@@ -1,0 +1,73 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+#define MAX_INPUT 1024
+#define MAX_ARGS 10
+
+int main() {
+    char input[MAX_INPUT];
+    char *args[MAX_ARGS];
+    char *token;
+    pid_t pid;
+    int status;
+
+    // Customize this according to your initials, surname, section
+    char *prompt = "kbpelaez@cmsc125cd1";
+
+    while (1) {
+        // Print prompt
+        printf("%s - ", prompt);
+        fflush(stdout);
+
+        // Read input
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            printf("\n");
+            break;
+        }
+
+        // Remove newline character
+        input[strcspn(input, "\n")] = '\0';
+
+        // Exit command
+        if (strcmp(input, "exit") == 0) {
+            break;
+        }
+
+        // Tokenize input into arguments
+        int i = 0;
+        token = strtok(input, " ");
+        while (token != NULL && i < MAX_ARGS - 1) {
+            args[i++] = token;
+            token = strtok(NULL, " ");
+        }
+        args[i] = NULL;
+
+        if (args[0] == NULL) {
+            continue; // empty input
+        }
+
+        // Fork a new process
+        pid = fork();
+
+        if (pid < 0) {
+            perror("fork failed");
+            continue;
+        }
+
+        if (pid == 0) {
+            // Child process: execute command
+            if (execvp(args[0], args) == -1) {
+                perror("command failed");
+            }
+            exit(EXIT_FAILURE);
+        } else {
+            // Parent process: wait for child
+            waitpid(pid, &status, 0);
+        }
+    }
+
+    return 0;
+}
