@@ -1,0 +1,80 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+#define MAX_INPUT 1024
+
+int main() {
+    char input[MAX_INPUT];
+    char *cmd, *opt1, *opt2;
+    pid_t pid;
+    int status;
+
+    // Customize with your initials, surname, section
+    char *prompt = "kbpelaez@cmsc125cd1";
+
+    while (1) {
+        // Print prompt
+        printf("%s - ", prompt);
+        fflush(stdout);
+
+        // Read input
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            printf("\n");
+            break;
+        }
+
+        // Remove newline character
+        input[strcspn(input, "\n")] = '\0';
+
+        // Exit command
+        if (strcmp(input, "exit") == 0) {
+            break;
+        }
+
+        // Parse command and up to 2 options
+        cmd = strtok(input, " ");
+        opt1 = strtok(NULL, " ");
+        opt2 = strtok(NULL, " ");
+        char *extra = strtok(NULL, " "); // check if more than 2 args
+
+        if (cmd == NULL) {
+            continue; // empty input
+        }
+
+        if (extra != NULL) {
+            printf("Error: Only up to 2 options are allowed.\n");
+            continue;
+        }
+
+        // Fork a new process
+        pid = fork();
+
+        if (pid < 0) {
+            perror("fork failed");
+            continue;
+        }
+
+        if (pid == 0) {
+            // Child process: execute command using execlp
+            if (opt1 == NULL) {
+                execlp(cmd, cmd, (char *)NULL);
+            } else if (opt2 == NULL) {
+                execlp(cmd, cmd, opt1, (char *)NULL);
+            } else {
+                execlp(cmd, cmd, opt1, opt2, (char *)NULL);
+            }
+
+            // If execlp fails
+            perror("command failed");
+            exit(EXIT_FAILURE);
+        } else {
+            // Parent process: wait for child
+            waitpid(pid, &status, 0);
+        }
+    }
+
+    return 0;
+}
