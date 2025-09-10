@@ -1,0 +1,233 @@
+/*
+ * Author: 
+ * Section: 
+ * Program Description: Preemptive Shortest Job First (SRTF) CPU scheduler simulation
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#define MAX 10
+
+/* Process Control Block (PCB) */
+typedef struct PCB {
+	int process_id;
+	int arrival_time;
+	int job_length;  /* total burst */
+	int wait_time;   /* accumulated waiting time */
+	int run_time;    /* time already executed */
+}PCB;
+
+/* Singly-linked list of PCB */
+typedef struct linked_list{
+	PCB pcb;
+	struct linked_list *next;
+}linked_list;
+
+/* Stores the processes */
+linked_list *ready_queue = NULL;
+
+/* --- helpers --- */
+static int remaining_time(const PCB *p){ return p->job_length - p->run_time; }
+
+/* Prints the details of the process */
+void PrintPCB(PCB pcb){
+	printf("\tProcess ID: %d, Arrival Time: %d, Job Length: %d, Wait Time: %d, Run Time: %d\n",
+		pcb.process_id, pcb.arrival_time, pcb.job_length, pcb.wait_time, pcb.run_time);
+}
+
+/* Prints the processes in the ready queue */
+void PrintReadyQueue(){
+	linked_list *ptr = ready_queue;
+
+	printf("\n\tPrinting Ready Queue:\n");
+	if(!ptr){
+		printf("\t<empty>\n");
+		return;
+	}
+	while(ptr!=NULL){
+		PrintPCB(ptr->pcb);
+		ptr = ptr->next;
+	}
+}
+
+/* 
+ * Reads from process.txt
+ *   First line: process count
+ *   Next lines: <arrival_time> <job_length> (sorted by arrival)
+ * Fills arrival_time[] and job_length[]
+ * Returns process count
+ */
+int ReadProcesses(int *arrival_time, int *job_length){
+	int arrival, length, pcnt = 0;
+	FILE *fp;
+
+	fp = fopen("process.txt", "r");
+	
+	if(fp != NULL){
+		if(fscanf(fp, "%d", &pcnt) != 1){
+			fprintf(stderr, "Error: invalid header in process.txt\n");
+			fclose(fp);
+			exit(EXIT_FAILURE);
+		}
+		if(pcnt > MAX){
+			fprintf(stderr, "Error: process count %d exceeds MAX=%d\n", pcnt, MAX);
+			fclose(fp);
+			exit(EXIT_FAILURE);
+		}
+
+		for(int i=0; i<pcnt; i++){
+			if(fscanf(fp, "%d %d", &arrival, &length) != 2){
+				fprintf(stderr, "Error: invalid line for process %d\n", i+1);
+				fclose(fp);
+				exit(EXIT_FAILURE);
+			}
+			arrival_time[i] = arrival;
+			job_length[i]   = length;
+		}
+		fclose(fp);
+	}else{
+		fprintf(stderr, "Error: could not open process.txt\n");
+		exit(EXIT_FAILURE);
+	}
+	return pcnt;
+}
+
+/* 
+ * Prints the terminated process
+ * Removes the terminated process at the head of the queue
+ */
+void Dequeue(){	
+	if(!ready_queue) return;
+
+	printf("\tThe following process already ended:\n");
+	PrintPCB(ready_queue->pcb);
+
+	linked_list *dead = ready_queue;
+	ready_queue = ready_queue->next;
+	free(dead);
+}
+
+/* Inserts the process in the queue (sorted by SHORTEST REMAINING TIME) */
+void Enqueue(int process_id, int arrival, int job_length){
+	linked_list *node = (linked_list*)malloc(sizeof(linked_list));
+	node->pcb.process_id   = process_id;
+	node->pcb.arrival_time = arrival;
+	node->pcb.job_length   = job_length;
+	node->pcb.wait_time    = 0;
+	node->pcb.run_time     = 0;
+	node->next = NULL;
+
+	if(ready_queue == NULL){
+		ready_queue = node;
+		return;
+	}
+
+	int rem = remaining_time(&node->pcb);
+
+	/* insert at head if strictly shorter than current head */
+	if(remaining_time(&ready_queue->pcb) > rem){
+		node->next = ready_queue;
+		ready_queue = node;
+		return;
+	}
+
+	/* otherwise find spot (stable for ties) */
+	linked_list *prev = ready_queue, *curr = ready_queue->next;
+	while(curr != NULL && remaining_time(&curr->pcb) <= rem){
+		prev = curr;
+		curr = curr->next;
+	}
+	prev->next = node;
+	node->next = curr;
+}
+
+/* Reinsert the head if its remaining time no longer smallest after it runs a tick */
+static void ReorderAfterHeadTick(){
+	if(!ready_queue || !ready_queue->next) return;
+
+	int head_rem = remaining_time(&ready_queue->pcb);
+	if(remaining_time(&ready_queue->next->pcb) >= head_rem) return; /* still smallest */
+
+	/* pop head */
+	linked_list *head = ready_queue;
+	ready_queue = head->next;
+	head->next = NULL;
+
+	/* reinsert by remaining time (not at head because next < head already) */
+	linked_list *prev = ready_queue, *curr = ready_queue->next;
+	while(curr && remaining_time(&curr->pcb) <= head_rem){
+		prev = curr;
+		curr = curr->next;
+	}
+	prev->next = head;
+	head->next = curr;
+}
+
+/*
+ * Simulates processing of a single CPU cycle
+ * - run head for 1 unit
+ * - others wait +1
+ * - if head finishes, dequeue
+ * - else reorder (preemption logic maintained)
+ */
+void Processing(){
+	if(!ready_queue) return;
+
+	/* run head */
+	ready_queue->pcb.run_time += 1;
+
+	/* others wait */
+	for(linked_list *p = ready_queue->next; p != NULL; p = p->next)
+		p->pcb.wait_time += 1;
+
+	/* finished? */
+	if(ready_queue->pcb.run_time >= ready_queue->pcb.job_length){
+		Dequeue();
+		return;
+	}
+
+	/* otherwise, head remaining decreased; ensure it’s still the smallest */
+	ReorderAfterHeadTick();
+}
+
+/* 
+ * Simulates the CPU scheduling
+ * - each cycle: enqueue arrivals, process 1 tick, print queue
+ * - ends when all have arrived and ready_queue becomes empty
+ */
+void RunSimulation(int *arrival_time, int *job_length, int process_count){
+	int next_to_arrive = 0;
+	int cpu_cycles = 1;
+
+	while(1){
+		printf("\nCPU Cycle: %d\n", cpu_cycles);
+
+		/* enqueue any process arriving exactly at this cycle */
+		while(next_to_arrive < process_count && arrival_time[next_to_arrive] == cpu_cycles){
+			int pid = next_to_arrive + 1;
+			Enqueue(pid, arrival_time[next_to_arrive], job_length[next_to_arrive]);
+			next_to_arrive++;
+		}
+
+		/* end if nothing left to do */
+		if(ready_queue == NULL && next_to_arrive >= process_count){
+			printf("\nNo more processes to run. Simulation ended.\n");
+			break;
+		}
+
+		/* one CPU tick */
+		Processing();
+
+		/* show state */
+		PrintReadyQueue();
+
+		cpu_cycles++;
+	}
+}
+
+int main(){	
+	int arrival_time[MAX], job_length[MAX];
+	int process_count = ReadProcesses(arrival_time, job_length);
+	RunSimulation(arrival_time, job_length, process_count);
+	return 0;
+}
