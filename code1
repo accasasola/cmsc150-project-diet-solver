@@ -1,0 +1,108 @@
+// lab07_surname_B.c
+// Compile:  gcc -O2 -Wall -o lab07_B lab07_surname_B.c
+// Run:      ./lab07_B
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <string.h>
+#include <errno.h>
+
+#define FTOK_PATH "."
+#define PROJ_META  0x11
+#define PROJ_A     0x22
+#define PROJ_B     0x33
+#define PROJ_RES   0x44
+
+typedef struct {
+    int a_rows, a_cols;
+    int b_rows, b_cols;
+    int total_cells;         // -1 means incompatible
+    volatile int computed;   // progress counter
+    volatile int readyA;     // A prepared the data
+} Meta;
+
+static int idx(int r, int c, int ncols) { return r * ncols + c; }
+
+static void die(const char* msg) {
+    perror(msg);
+    exit(EXIT_FAILURE);
+}
+
+int main(void) {
+    // Attach to meta first
+    key_t kMeta = ftok(FTOK_PATH, PROJ_META);
+    if (kMeta == -1) die("ftok meta");
+
+    int shmidMeta = shmget(kMeta, sizeof(Meta), 0666);
+    if (shmidMeta < 0) die("shmget meta (is A running first?)");
+    Meta *meta = (Meta*)shmat(shmidMeta, NULL, 0);
+    if (meta == (void*)-1) die("shmat meta");
+
+    // Wait for A to publish sizes
+    while (!meta->readyA) usleep(1000);
+
+    if (meta->total_cells == -1) {
+        fprintf(stderr, "Error: matrix multiplication not possible (A cols != B rows)\n");
+        // Nothing to clean (A created segments but result is meaningless). Still try to remove.
+    }
+
+    int ar = meta->a_rows, ac = meta->a_cols;
+    int br = meta->b_rows, bc = meta->b_cols;
+
+    // Attach to the three matrix segments
+    key_t kA   = ftok(FTOK_PATH, PROJ_A);
+    key_t kB   = ftok(FTOK_PATH, PROJ_B);
+    key_t kRes = ftok(FTOK_PATH, PROJ_RES);
+    if (kA==-1 || kB==-1 || kRes==-1) die("ftok matrices");
+
+    int shmidA = shmget(kA, sizeof(int) * ar * ac, 0666);
+    int shmidB = shmget(kB, sizeof(int) * br * bc, 0666);
+    int shmidR = shmget(kRes, sizeof(int) * ar * bc, 0666);
+    if (shmidA<0 || shmidB<0 || shmidR<0) die("shmget matrices");
+
+    int *shA = (int*)shmat(shmidA, NULL, 0);
+    int *shB = (int*)shmat(shmidB, NULL, 0);
+    int *shR = (int*)shmat(shmidR, NULL, 0);
+    if (shA==(void*)-1 || shB==(void*)-1 || shR==(void*)-1) die("shmat matrices");
+
+    if (meta->total_cells != -1) {
+        // ---------- compute right half ----------
+        int left_cols  = (bc + 1) / 2;    // A did [0 .. left_cols-1]
+        for (int i = 0; i < ar; ++i) {
+            for (int j = left_cols; j < bc; ++j) {
+                long sum = 0;
+                for (int k = 0; k < ac; ++k)
+                    sum += shA[idx(i,k,ac)] * shB[idx(k,j,bc)];
+                shR[idx(i,j,bc)] = (int)sum;
+                __sync_fetch_and_add((int*)&meta->computed, 1);
+            }
+        }
+
+        // ---------- wait until all cells are done, then print ----------
+        while (meta->computed < meta->total_cells) usleep(1000);
+
+        for (int i = 0; i < ar; ++i) {
+            for (int j = 0; j < bc; ++j) {
+                printf("%d", shR[idx(i,j,bc)]);
+                if (j+1 < bc) printf(" ");
+            }
+            printf("\n");
+        }
+    }
+
+    // ---------- cleanup (allow A to exit first) ----------
+    sleep(1); // small grace period
+    // Detach all
+    shmdt(shA); shmdt(shB); shmdt(shR); shmdt(meta);
+    // Remove segments (B takes responsibility to clean up)
+    shmctl(shmidA, IPC_RMID, NULL);
+    shmctl(shmidB, IPC_RMID, NULL);
+    shmctl(shmidR, IPC_RMID, NULL);
+    shmctl(shmidMeta, IPC_RMID, NULL);
+
+    return 0;
+}
