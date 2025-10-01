@@ -1,0 +1,105 @@
+/*
+  lab07_surname_A.c  (A = “server”)
+  Build: gcc -O2 -Wall -o lab07_A lab07_surname_A.c
+  Run:   ./lab07_A   (expects input.txt)
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <string.h>
+
+#define KEY_META  0xC0FF10
+#define KEY_A     0xC0FF11
+#define KEY_B     0xC0FF12
+#define KEY_RES   0xC0FF13
+
+typedef struct {
+    int a_rows, a_cols;
+    int b_rows, b_cols;
+    int total_cells;      // a_rows * b_cols, or -1 if incompatible
+    volatile int computed; // #cells written to C
+    volatile int readyA;   // A has put sizes & matrices in SHM
+} Meta;
+
+static inline int idx(int r, int c, int ncols) { return r*ncols + c; }
+static void die(const char* m){ perror(m); exit(1); }
+
+int main(void){
+    // --------- Read input.txt ----------
+    FILE *fp = fopen("input.txt", "r");
+    if(!fp) die("fopen input.txt");
+
+    int ar, ac, br, bc;
+    if (fscanf(fp, "%d %d", &ar, &ac) != 2) { fprintf(stderr,"Bad A dims\n"); return 1; }
+    int *A = malloc(sizeof(int)*ar*ac);
+    for(int i=0;i<ar;i++) for(int j=0;j<ac;j++)
+        if(fscanf(fp, "%d", &A[idx(i,j,ac)])!=1){ fprintf(stderr,"Bad A elems\n"); return 1; }
+
+    if (fscanf(fp, "%d %d", &br, &bc) != 2) { fprintf(stderr,"Bad B dims\n"); return 1; }
+    int *B = malloc(sizeof(int)*br*bc);
+    for(int i=0;i<br;i++) for(int j=0;j<bc;j++)
+        if(fscanf(fp, "%d", &B[idx(i,j,bc)])!=1){ fprintf(stderr,"Bad B elems\n"); return 1; }
+    fclose(fp);
+
+    // --------- Create shared memories (like your server.c) ----------
+    int shmidMeta = shmget(KEY_META, sizeof(Meta), IPC_CREAT | 0666);
+    if(shmidMeta<0) die("shmget meta");
+    Meta *meta = (Meta*)shmat(shmidMeta, NULL, 0);
+    if(meta==(void*)-1) die("shmat meta");
+
+    meta->a_rows = ar; meta->a_cols = ac;
+    meta->b_rows = br; meta->b_cols = bc;
+    meta->computed = 0;
+    meta->readyA = 0;
+    if (ac != br) {
+        meta->total_cells = -1;    // signal error to B
+        meta->readyA = 1;
+        fprintf(stderr,"Error: A.cols != B.rows, cannot multiply.\n");
+        // Leave after signaling so B can print error and clean up.
+        return 0;
+    }
+    meta->total_cells = ar*bc;
+
+    int shmidA = shmget(KEY_A, sizeof(int)*ar*ac, IPC_CREAT | 0666);
+    if(shmidA<0) die("shmget A");
+    int *shA = (int*)shmat(shmidA, NULL, 0);
+    if(shA==(void*)-1) die("shmat A");
+
+    int shmidB = shmget(KEY_B, sizeof(int)*br*bc, IPC_CREAT | 0666);
+    if(shmidB<0) die("shmget B");
+    int *shB = (int*)shmat(shmidB, NULL, 0);
+    if(shB==(void*)-1) die("shmat B");
+
+    int shmidR = shmget(KEY_RES, sizeof(int)*ar*bc, IPC_CREAT | 0666);
+    if(shmidR<0) die("shmget RES");
+    int *shR = (int*)shmat(shmidR, NULL, 0);
+    if(shR==(void*)-1) die("shmat RES");
+
+    // Put A and B into SHM and zero result
+    memcpy(shA, A, sizeof(int)*ar*ac);
+    memcpy(shB, B, sizeof(int)*br*bc);
+    memset(shR, 0, sizeof(int)*ar*bc);
+    free(A); free(B);
+
+    // Signal B that data & sizes are ready (same vibe as your “Run the client now.”)
+    meta->readyA = 1;
+
+    // --------- Compute LEFT half (include middle if odd) ----------
+    int left_cols = (bc + 1)/2; // ceil
+    for(int i=0;i<ar;i++){
+        for(int j=0;j<left_cols;j++){
+            long sum = 0;
+            for(int k=0;k<ac;k++) sum += shA[idx(i,k,ac)] * shB[idx(k,j,bc)];
+            shR[idx(i,j,bc)] = (int)sum;
+            meta->computed++; // simple counter is OK for this lab
+        }
+    }
+
+    // Like your sample: pause so you can start B, then A can simply exit.
+    // No cleanup here (B will print and remove the segments).
+    return 0;
+}
